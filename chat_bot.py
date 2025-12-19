@@ -5,6 +5,7 @@
 import os
 import asyncio
 import re
+import threading
 from datetime import datetime
 from typing import Optional
 
@@ -52,13 +53,15 @@ class ChatBot:
     def setup_handlers(self):
         @self.bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private and e.text and not e.text.startswith('/') and e.sender_id != self.owner_id))
         async def handle_message(event):
-            """Handle incoming messages from users (not from owner)"""
+            """Handle incoming text messages from users (not from owner)"""
             sender_id = event.sender_id
             
             # Save message from user to owner
-            db.save_chat_message(sender_id, self.owner_id, event.text, 'user')
+            db.save_chat_message(sender_id, self.owner_id, event.text, 'text')
             
-            await event.respond("✅")
+            # Send and auto-delete acknowledgment
+            ack_msg = await event.respond("✅")
+            asyncio.create_task(self.delete_message_later(ack_msg, delay=2))
             
             # Notify owner with reply button
             try:
@@ -76,6 +79,69 @@ class ChatBot:
             
             LOGGER(__name__).info(f"Message from {sender_id}: {event.text[:50]}")
         
+        @self.bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private and not e.text and e.sender_id != self.owner_id))
+        async def handle_media(event):
+            """Handle incoming media messages from users (photos, videos, documents, etc.)"""
+            sender_id = event.sender_id
+            
+            # Determine media type
+            media_type = 'media'
+            media_description = '📁 Document'
+            
+            if event.photo:
+                media_type = 'photo'
+                media_description = '📷 Photo'
+            elif event.video:
+                media_type = 'video'
+                media_description = '🎬 Video'
+            elif event.audio:
+                media_type = 'audio'
+                media_description = '🎵 Audio'
+            elif event.voice:
+                media_type = 'voice'
+                media_description = '🎤 Voice Message'
+            elif event.video_note:
+                media_type = 'video_note'
+                media_description = '📹 Video Note'
+            elif event.document:
+                media_type = 'document'
+                media_description = f'📄 {event.document.attributes[0].file_name if event.document.attributes else "Document"}'
+            elif event.gif:
+                media_type = 'gif'
+                media_description = '🎞️ GIF'
+            elif event.sticker:
+                media_type = 'sticker'
+                media_description = '🎨 Sticker'
+            
+            # Save media reference to database
+            caption = event.message.text or media_description
+            db.save_chat_message(sender_id, self.owner_id, caption, media_type)
+            
+            # Send and auto-delete acknowledgment
+            ack_msg = await event.respond("✅")
+            asyncio.create_task(self.delete_message_later(ack_msg, delay=2))
+            
+            # Forward media to owner with info
+            try:
+                forward_caption = f"{sender_id}\n\n{media_description}"
+                if event.message.text:
+                    forward_caption += f"\n\n{event.message.text}"
+                
+                buttons = [
+                    [InlineKeyboardButton.callback("📤 Reply", f"reply_{sender_id}")]
+                ]
+                
+                await event.forward(self.owner_id)
+                await self.bot.send_message(
+                    self.owner_id,
+                    forward_caption,
+                    buttons=buttons
+                )
+            except Exception as e:
+                LOGGER(__name__).error(f"Failed to forward media to owner: {e}")
+            
+            LOGGER(__name__).info(f"{media_type.upper()} from {sender_id}")
+        
         @self.bot.on(events.NewMessage(pattern='/start', incoming=True, func=lambda e: e.is_private))
         async def handle_start(event):
             """Handle /start command"""
@@ -84,11 +150,13 @@ class ChatBot:
             
             await event.respond(
                 "👋 **Welcome to the Chat Bot!**\n\n"
-                "This bot allows you to send messages directly to the owner.\n\n"
+                "This bot allows you to send messages and media directly to the owner.\n\n"
                 "**How to use:**\n"
-                "1️⃣ Send any message and it will be delivered to the owner\n"
+                "1️⃣ Send any message or media file and it will be delivered to the owner\n"
                 "2️⃣ Use `/status` to check for replies\n"
                 "3️⃣ Use `/history` to see your conversation\n\n"
+                "**Supported Media:**\n"
+                "📷 Photos • 🎬 Videos • 📄 Documents • 🎵 Audio • 🎤 Voice • 🎞️ GIFs\n\n"
                 "**Available Commands:**\n"
                 "`/start` - Welcome message\n"
                 "`/status` - Check unread replies\n"
@@ -141,8 +209,18 @@ class ChatBot:
                 "`/status` - Check for new replies\n"
                 "`/history` - View conversation\n"
                 "`/help` - Show this help\n\n"
-                "**How to send a message:**\n"
-                "Simply type any message and it will be sent to the owner.\n\n"
+                "**How to send messages:**\n"
+                "Simply type any message or send media files:\n\n"
+                "**Text Messages:**\n"
+                "Type your message and send\n\n"
+                "**Media Files:**\n"
+                "📷 Send photos\n"
+                "🎬 Send videos\n"
+                "📄 Send documents\n"
+                "🎵 Send audio\n"
+                "🎤 Send voice messages\n"
+                "🎞️ Send GIFs\n"
+                "🎨 Send stickers\n\n"
                 "**Example:**\n"
                 "Type: `Hi, can you help me?`"
             )
@@ -263,7 +341,9 @@ class ChatBot:
                 await event.respond(
                     "**📤 Send Message to User**\n\n"
                     "Usage: `/send <user_id> <message>`\n\n"
-                    "Example: `/send 123456789 Hi! How are you?`"
+                    "Example: `/send 123456789 Hi! How are you?`\n\n"
+                    "**To send media:**\n"
+                    "Reply to media with `/send <user_id> [optional caption]`"
                 )
                 return
             
@@ -271,11 +351,18 @@ class ChatBot:
             message = match.group(2)
             
             try:
-                await self.bot.send_message(
-                    user_id,
-                    message
-                )
-                db.save_chat_message(self.owner_id, user_id, message, 'owner')
+                # Check if replying to media
+                if event.reply_to and (event.reply_to.media):
+                    # Forward the media with message
+                    await event.reply_to.forward(user_id)
+                    if message:
+                        await self.bot.send_message(user_id, message)
+                    db.save_chat_message(self.owner_id, user_id, f"[Media] {message}" if message else "[Media sent]", 'owner')
+                else:
+                    # Send text message
+                    await self.bot.send_message(user_id, message)
+                    db.save_chat_message(self.owner_id, user_id, message, 'owner')
+                
                 db.add_user(user_id)
                 
                 msg = await event.respond(f"✅ Sent to {user_id}")
@@ -343,8 +430,44 @@ class ChatBot:
         finally:
             LOGGER(__name__).info("Chat Bot Stopped")
 
+def start_http_server():
+    """Start HTTP server in a separate thread"""
+    try:
+        from waitress import serve
+        port = int(os.getenv('CHATBOT_PORT', os.getenv('PORT', 5001)))
+        LOGGER(__name__).info(f"Starting HTTP server on port {port}")
+        serve(
+            lambda environ, start_response: app(environ, start_response),
+            host='0.0.0.0',
+            port=port,
+            _quiet=True
+        )
+    except Exception as e:
+        LOGGER(__name__).error(f"Error starting HTTP server: {e}")
+
+def app(environ, start_response):
+    """Simple WSGI app for health checks"""
+    path = environ.get('PATH_INFO', '/')
+    
+    if path in ['/', '/health', '/ping']:
+        status = '200 OK'
+        response_headers = [('Content-Type', 'application/json')]
+        start_response(status, response_headers)
+        return [b'{"status": "ok", "message": "ChatBot is running"}']
+    
+    status = '404 Not Found'
+    response_headers = [('Content-Type', 'text/plain')]
+    start_response(status, response_headers)
+    return [b'Not Found']
+
 async def main():
     """Main entry point"""
+    # Start HTTP server in background thread
+    server_thread = threading.Thread(target=start_http_server, daemon=True)
+    server_thread.start()
+    LOGGER(__name__).info("HTTP server started in background thread")
+    
+    # Run the bot
     chat_bot = ChatBot()
     await chat_bot.run()
 

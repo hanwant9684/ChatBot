@@ -9,6 +9,14 @@ from typing import Optional, List, Dict
 from logger import LOGGER
 from threading import Lock
 
+def trigger_backup_on_critical_change(action: str, user_id: int):
+    """Stub function for cloud backup trigger - optional feature"""
+    pass
+
+def trigger_backup_on_session(user_id: int):
+    """Stub function for session backup trigger - optional feature"""
+    pass
+
 class DatabaseManager:
     def __init__(self, db_path: Optional[str] = None):
         if not db_path:
@@ -482,10 +490,6 @@ class DatabaseManager:
             return False
 
     def is_banned(self, user_id: int) -> bool:
-        cache_key = f"banned_{user_id}"
-        if cached is not None:
-            return cached
-        
         user = self.get_user(user_id)
         is_banned = bool(user and user.get('is_banned', False))
         return is_banned
@@ -852,10 +856,6 @@ class DatabaseManager:
     
     def check_legal_acceptance(self, user_id: int) -> bool:
         """Check if user has accepted both Terms & Conditions and Privacy Policy"""
-        cache_key = f"legal_{user_id}"
-        if cached is not None:
-            return cached
-        
         try:
             conn = self._get_connection()
             cursor = conn.cursor()
