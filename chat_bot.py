@@ -55,23 +55,34 @@ class ChatBot:
         async def handle_message(event):
             """Handle incoming text messages from users (not from owner)"""
             sender_id = event.sender_id
+            sender_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Unknown"
+            username = f"@{event.sender.username}" if event.sender.username else "No Username"
             
             # Save message from user to owner
             db.save_chat_message(sender_id, self.owner_id, event.text, 'text')
             
             # Send and auto-delete acknowledgment
-            ack_msg = await event.respond("✅")
+            ack_msg = await event.respond("✅ **Message Delivered**")
             asyncio.create_task(self.delete_message_later(ack_msg, delay=2))
             
             # Notify owner with reply button
             try:
                 buttons = [
-                    [InlineKeyboardButton.callback("📤 Reply", f"reply_{sender_id}")]
+                    [InlineKeyboardButton.callback("📤 Reply to User", f"reply_{sender_id}")]
                 ]
+                
+                notification_text = (
+                    f"📩 **New Message Received**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **From:** {sender_name} ({username})\n"
+                    f"🆔 **ID:** `{sender_id}`\n\n"
+                    f"📝 **Content:**\n"
+                    f"_{event.text}_"
+                )
                 
                 await self.bot.send_message(
                     self.owner_id,
-                    f"{sender_id}\n\n{event.text}",
+                    notification_text,
                     buttons=buttons
                 )
             except Exception as e:
@@ -83,6 +94,8 @@ class ChatBot:
         async def handle_media(event):
             """Handle incoming media messages from users (photos, videos, documents, etc.)"""
             sender_id = event.sender_id
+            sender_name = f"{event.sender.first_name or ''} {event.sender.last_name or ''}".strip() or "Unknown"
+            username = f"@{event.sender.username}" if event.sender.username else "No Username"
             
             # Determine media type
             media_type = 'media'
@@ -118,23 +131,29 @@ class ChatBot:
             db.save_chat_message(sender_id, self.owner_id, caption, media_type)
             
             # Send and auto-delete acknowledgment
-            ack_msg = await event.respond("✅")
+            ack_msg = await event.respond(f"✅ **{media_description} Delivered**")
             asyncio.create_task(self.delete_message_later(ack_msg, delay=2))
             
             # Forward media to owner with info
             try:
-                forward_caption = f"{sender_id}\n\n{media_description}"
+                notification_text = (
+                    f"📦 **New {media_description.upper()} Received**\n"
+                    f"━━━━━━━━━━━━━━━━━━━━\n"
+                    f"👤 **From:** {sender_name} ({username})\n"
+                    f"🆔 **ID:** `{sender_id}`\n"
+                )
+                
                 if event.message.text:
-                    forward_caption += f"\n\n{event.message.text}"
+                    notification_text += f"\n💬 **Caption:**\n_{event.message.text}_"
                 
                 buttons = [
-                    [InlineKeyboardButton.callback("📤 Reply", f"reply_{sender_id}")]
+                    [InlineKeyboardButton.callback("📤 Reply to User", f"reply_{sender_id}")]
                 ]
                 
-                await event.forward(self.owner_id)
+                await event.forward_to(self.owner_id)
                 await self.bot.send_message(
                     self.owner_id,
-                    forward_caption,
+                    notification_text,
                     buttons=buttons
                 )
             except Exception as e:
@@ -148,21 +167,28 @@ class ChatBot:
             sender_id = event.sender_id
             db.add_user(sender_id, event.sender.username, event.sender.first_name, event.sender.last_name)
             
-            await event.respond(
-                "👋 **Welcome to the Chat Bot!**\n\n"
-                "This bot allows you to send messages and media directly to the owner.\n\n"
-                "**How to use:**\n"
-                "1️⃣ Send any message or media file and it will be delivered to the owner\n"
-                "2️⃣ Use `/status` to check for replies\n"
-                "3️⃣ Use `/history` to see your conversation\n\n"
-                "**Supported Media:**\n"
-                "📷 Photos • 🎬 Videos • 📄 Documents • 🎵 Audio • 🎤 Voice • 🎞️ GIFs\n\n"
-                "**Available Commands:**\n"
-                "`/start` - Welcome message\n"
-                "`/status` - Check unread replies\n"
-                "`/history` - View your conversation\n"
-                "`/help` - Help menu"
+            welcome_text = (
+                "👋 **Welcome to the Professional Chat Support Bot!**\n\n"
+                "I am here to help you communicate directly with our team. "
+                "Your messages are securely delivered and handled with care.\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "📊 **HOW IT WORKS**\n"
+                "1️⃣ **Send Message:** Type anything or send a file.\n"
+                "2️⃣ **Review:** The owner will review and reply.\n"
+                "3️⃣ **Stay Notified:** You'll get a notification when they reply!\n\n"
+                "📁 **SUPPORTED MEDIA**\n"
+                "• 📸 Photos & 🎥 Videos\n"
+                "• 📄 Documents & 🎵 Audio\n"
+                "• 🎤 Voice & 🎞️ GIFs/Stickers\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "🛠 **AVAILABLE COMMANDS**\n"
+                "• `/status` - Check for new unread replies\n"
+                "• `/history` - View recent conversation history\n"
+                "• `/help` - View this help menu again\n\n"
+                "✨ *How can we help you today?*"
             )
+            
+            await event.respond(welcome_text)
             LOGGER(__name__).info(f"User {sender_id} started the bot")
         
         @self.bot.on(events.NewMessage(pattern='/status', incoming=True, func=lambda e: e.is_private))
@@ -174,9 +200,17 @@ class ChatBot:
             unread = sum(1 for msg in conversations if msg['from_user_id'] == self.owner_id and msg['is_read'] == 0)
             
             if unread == 0:
-                await event.respond("📭 **No new replies yet.**\n\nUse `/history` to see your conversation.")
+                await event.respond(
+                    "📭 **Inbox Clear**\n\n"
+                    "You have no new unread replies from the owner.\n\n"
+                    "💡 *Tip: Use /history to see previous messages.*"
+                )
             else:
-                await event.respond(f"📬 **You have {unread} new reply(ies)!**\n\nUse `/history` to read them.")
+                await event.respond(
+                    f"📬 **New Messages Detected!**\n\n"
+                    f"You have **{unread}** unread reply(ies) waiting for you.\n\n"
+                    "👉 Use `/history` to read them now."
+                )
             
             db.mark_messages_as_read(sender_id, self.owner_id)
         
@@ -187,14 +221,26 @@ class ChatBot:
             conversations = db.get_user_conversations(sender_id, limit=20)
             
             if not conversations:
-                await event.respond("📭 **No messages yet.**\n\nSend a message to start a conversation!")
+                await event.respond("📭 **No History**\n\nYour conversation history is empty. Send a message to get started!")
                 return
             
-            text = "**📨 Your Conversation History:**\n\n"
+            text = "📜 **Conversation History (Last 20)**\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            
             for msg in reversed(conversations):
-                sender_tag = "📤 You" if msg['from_user_id'] == sender_id else "📥 Owner"
-                time_str = datetime.fromisoformat(msg['sent_date']).strftime('%d/%m %H:%M')
-                text += f"{sender_tag} ({time_str})\n`{msg['message'][:80]}{'...' if len(msg['message']) > 80 else ''}`\n\n"
+                is_user = msg['from_user_id'] == sender_id
+                sender_label = "👤 **You**" if is_user else "👑 **Owner**"
+                time_str = datetime.fromisoformat(msg['sent_date']).strftime('%b %d, %H:%M')
+                
+                msg_content = msg['message']
+                if len(msg_content) > 150:
+                    msg_content = msg_content[:147] + "..."
+                
+                text += f"{sender_label}  |  _{time_str}_\n"
+                text += f"└ `{msg_content}`\n\n"
+            
+            text += "━━━━━━━━━━━━━━━━━━━━\n"
+            text += "💡 *Newest messages are at the bottom.*"
             
             await event.respond(text)
             db.mark_messages_as_read(sender_id, self.owner_id)
@@ -304,13 +350,33 @@ class ChatBot:
                 await event.respond(f"❌ **Error sending reply:** `{str(e)}`")
                 LOGGER(__name__).error(f"Error replying to {user_id}: {e}")
         
+        @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
+        async def owner_help(event):
+            """Owner help menu"""
+            help_text = (
+                "👑 **Owner Control Center**\n"
+                "━━━━━━━━━━━━━━━━━━━━\n\n"
+                "📊 **GENERAL COMMANDS**\n"
+                "• `/mymessages` - List all active conversations\n"
+                "• `/ownerhelp` - View this help menu\n\n"
+                "✉️ **MESSAGING**\n"
+                "• `/send <user_id> <text>` - Send a new message\n"
+                "• `/reply <user_id> <text>` - Quick reply to user\n"
+                "• *Reply to any media* with `/send <user_id>` to forward it.\n\n"
+                "🔍 **TOOLS**\n"
+                "• `/searchuser <username/ID>` - Find user details\n\n"
+                "━━━━━━━━━━━━━━━━━━━━\n"
+                "💡 **Pro-Tip:** Click the 'Reply' button on any new message notification for the fastest response workflow."
+            )
+            await event.respond(help_text)
+
         @self.bot.on(events.NewMessage(pattern='/mymessages', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def view_all_messages(event):
             """View all user conversations (owner only)"""
             conversations = db.get_user_conversations(self.owner_id, limit=50)
             
             if not conversations:
-                await event.respond("📭 **No messages yet.**")
+                await event.respond("📭 **No Messages**\n\nYour database is currently empty.")
                 return
             
             # Group by user
@@ -321,16 +387,30 @@ class ChatBot:
                     grouped[other_user] = []
                 grouped[other_user].append(msg)
             
-            text = "**📨 All Conversations:**\n\n"
-            for user_id, msgs in sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)[:10]:
-                unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
-                text += f"👤 **User {user_id}:** {len(msgs)} message(s)"
-                if unread > 0:
-                    text += f" 📬 {unread} unread"
-                text += f"\n"
+            text = "📬 **Active Conversations**\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
-            text += "\nUse `/reply <user_id> <message>` to respond."
+            for user_id, msgs in sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)[:15]:
+                unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
+                last_msg = msgs[-1]['message']
+                if len(last_msg) > 30:
+                    last_msg = last_msg[:27] + "..."
+                
+                status_icon = "🔵" if unread > 0 else "⚪️"
+                text += f"{status_icon} **User:** `{user_id}`\n"
+                text += f"└ _{last_msg}_"
+                if unread > 0:
+                    text += f" (**{unread} new**)"
+                text += "\n\n"
+            
+            text += "━━━━━━━━━━━━━━━━━━━━\n"
+            text += "👉 Use `/reply <user_id> <message>` to respond."
             await event.respond(text)
+
+        @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
+        async def old_owner_help(event):
+            # This is a dummy to facilitate the replacement of the original functions
+            pass
         
         @self.bot.on(events.NewMessage(pattern='/send (.+?) (.+)', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def send_to_user(event):
@@ -354,9 +434,7 @@ class ChatBot:
                 # Check if replying to media
                 if event.reply_to and (event.reply_to.media):
                     # Forward the media with message
-                    await event.reply_to.forward(user_id)
-                    if message:
-                        await self.bot.send_message(user_id, message)
+                    await self.bot.send_file(user_id, event.reply_to.media, caption=message)
                     db.save_chat_message(self.owner_id, user_id, f"[Media] {message}" if message else "[Media sent]", 'owner')
                 else:
                     # Send text message
@@ -395,22 +473,6 @@ class ChatBot:
             except Exception as e:
                 await event.respond(f"❌ **User not found:** `{query}`\n\n`{str(e)}`")
         
-        @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
-        async def owner_help(event):
-            """Owner help menu"""
-            await event.respond(
-                "**👑 Owner Commands**\n\n"
-                "**Message Management:**\n"
-                "`/send <user_id> <message>` - Send message to any user\n"
-                "`/searchuser <username or ID>` - Find a user\n"
-                "`/mymessages` - View all conversations\n"
-                "`/reply <user_id> <message>` - Reply to user\n\n"
-                "**User Features:**\n"
-                "`/start` - Welcome message\n"
-                "`/status` - Check for replies\n"
-                "`/history` - View conversation\n"
-                "`/help` - User help"
-            )
     
     async def run(self):
         """Start the chat bot"""
