@@ -426,66 +426,68 @@ class ChatBot:
             page = int(event.data.decode().split('_')[-1])
             await self.show_messages_page(event, page=page, edit=True)
 
-        async def show_messages_page(self, event, page=1, edit=False):
-            """Helper to display a specific page of messages"""
-            per_page = 10
-            conversations = db.get_user_conversations(self.owner_id, limit=500)
+        self.bot.show_messages_page = self.show_messages_page # Inject into bot instance to make it accessible
+
+    async def show_messages_page(self, event, page=1, edit=False):
+        """Helper to display a specific page of messages"""
+        per_page = 10
+        conversations = db.get_user_conversations(self.owner_id, limit=500)
+        
+        if not conversations:
+            msg = "📭 **No Messages**\n\nYour database is currently empty."
+            if edit: await event.edit(msg)
+            else: await event.respond(msg)
+            return
+        
+        # Group by user
+        grouped = {}
+        for msg in conversations:
+            other_user = msg['from_user_id'] if msg['to_user_id'] == self.owner_id else msg['to_user_id']
+            if other_user not in grouped:
+                grouped[other_user] = []
+            grouped[other_user].append(msg)
+        
+        sorted_users = sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)
+        total_pages = (len(sorted_users) + per_page - 1) // per_page
+        start_idx = (page - 1) * per_page
+        end_idx = start_idx + per_page
+        
+        current_users = sorted_users[start_idx:end_idx]
+        
+        text = f"📬 **Active Conversations (Page {page}/{total_pages})**\n"
+        text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+        
+        for user_id, msgs in current_users:
+            unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
+            last_msg = msgs[-1]['message']
             
-            if not conversations:
-                msg = "📭 **No Messages**\n\nYour database is currently empty."
-                if edit: await event.edit(msg)
-                else: await event.respond(msg)
-                return
+            if len(last_msg) > 40:
+                last_msg = last_msg[:37] + "..."
             
-            # Group by user
-            grouped = {}
-            for msg in conversations:
-                other_user = msg['from_user_id'] if msg['to_user_id'] == self.owner_id else msg['to_user_id']
-                if other_user not in grouped:
-                    grouped[other_user] = []
-                grouped[other_user].append(msg)
-            
-            sorted_users = sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)
-            total_pages = (len(sorted_users) + per_page - 1) // per_page
-            start_idx = (page - 1) * per_page
-            end_idx = start_idx + per_page
-            
-            current_users = sorted_users[start_idx:end_idx]
-            
-            text = f"📬 **Active Conversations (Page {page}/{total_pages})**\n"
-            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
-            
-            for user_id, msgs in current_users:
-                unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
-                last_msg = msgs[-1]['message']
-                
-                if len(last_msg) > 40:
-                    last_msg = last_msg[:37] + "..."
-                
-                status_icon = "🔵" if unread > 0 else "⚪️"
-                text += f"{status_icon} **User:** `{user_id}`"
-                if unread > 0:
-                    text += f" (**{unread} new**)"
-                text += f"\n└ _{last_msg}_\n\n"
-            
-            text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "👉 Use `/reply <user_id> <message>` to respond.\n"
-            text += "👉 Use `/read <user_id>` to see all unread messages."
-            
-            buttons = []
-            row = []
-            if page > 1:
-                row.append(InlineKeyboardButton.callback("⬅️ Previous", f"msgs_page_{page-1}"))
-            if page < total_pages:
-                row.append(InlineKeyboardButton.callback("Next ➡️", f"msgs_page_{page+1}"))
-            
-            if row:
-                buttons.append(row)
-            
-            if edit:
-                await event.edit(text, buttons=buttons)
-            else:
-                await event.respond(text, buttons=buttons)
+            status_icon = "🔵" if unread > 0 else "⚪️"
+            text += f"{status_icon} **User:** `{user_id}`"
+            if unread > 0:
+                text += f" (**{unread} new**)"
+            text += f"\n└ _{last_msg}_\n\n"
+        
+        text += "━━━━━━━━━━━━━━━━━━━━\n"
+        text += "👉 Use `/reply <user_id> <message>` to respond.\n"
+        text += "👉 Use `/read <user_id>` to see all unread messages."
+        
+        buttons = None
+        row = []
+        if page > 1:
+            row.append(InlineKeyboardButton.callback("⬅️ Previous", f"msgs_page_{page-1}"))
+        if page < total_pages:
+            row.append(InlineKeyboardButton.callback("Next ➡️", f"msgs_page_{page+1}"))
+        
+        if row:
+            buttons = [row]
+        
+        if edit:
+            await event.edit(text, buttons=buttons)
+        else:
+            await event.respond(text, buttons=buttons)
 
         @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def old_owner_help(event):
