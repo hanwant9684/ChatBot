@@ -930,9 +930,6 @@ class DatabaseManager:
     def save_chat_message(self, from_user_id: int, to_user_id: int, message: str, message_type: str = 'text') -> bool:
         """Save a chat message between users"""
         try:
-            # Auto-cleanup older than 7 days
-            self.cleanup_old_messages(days=7)
-            
             with self.lock:
                 conn = self._get_connection()
                 cursor = conn.cursor()
@@ -988,7 +985,7 @@ class DatabaseManager:
             LOGGER(__name__).error(f"Error getting unread messages: {e}")
             return 0
     
-    def get_user_conversations(self, user_id: int, limit: int = 10) -> List[Dict]:
+    def get_user_conversations(self, user_id: int, limit: int = 50) -> List[Dict]:
         """Get recent conversations for a user"""
         try:
             conn = self._get_connection()

@@ -218,18 +218,33 @@ class ChatBot:
         async def view_history(event):
             """View conversation history"""
             sender_id = event.sender_id
+            
+            # If owner uses /history, it shows their global recent messages, which is confusing
+            # because they see messages from multiple users mixed together.
             conversations = db.get_user_conversations(sender_id, limit=20)
             
             if not conversations:
-                await event.respond("📭 **No History**\n\nYour conversation history is empty. Send a message to get started!")
+                await event.respond("📭 **No History**\n\nYour conversation history is empty.")
                 return
             
-            text = "📜 **Conversation History (Last 20)**\n"
+            # For owner, /history is less useful than /mymessages or /read <id>
+            # because it mixes all users they've talked to.
+            header = "📜 **Your Recent Activity (Global)**" if sender_id == self.owner_id else "📜 **Conversation History (Last 20)**"
+            
+            text = f"{header}\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
             for msg in reversed(conversations):
                 is_user = msg['from_user_id'] == sender_id
-                sender_label = "👤 **You**" if is_user else "👑 **Owner**"
+                
+                if sender_id == self.owner_id:
+                    # Logic for owner viewing their global history
+                    other_party = msg['to_user_id'] if msg['from_user_id'] == self.owner_id else msg['from_user_id']
+                    sender_label = f"👑 **You** (to `{other_party}`)" if msg['from_user_id'] == self.owner_id else f"👤 **User** `{other_party}`"
+                else:
+                    # Logic for normal user viewing their history with owner
+                    sender_label = "👤 **You**" if is_user else "👑 **Owner**"
+                
                 time_str = datetime.fromisoformat(msg['sent_date']).strftime('%b %d, %H:%M')
                 
                 msg_content = msg['message']
@@ -240,10 +255,14 @@ class ChatBot:
                 text += f"└ `{msg_content}`\n\n"
             
             text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "💡 *Newest messages are at the bottom.*"
+            if sender_id == self.owner_id:
+                text += "💡 *Tip: Use /read <user_id> for a specific user's chat.*"
+            else:
+                text += "💡 *Newest messages are at the bottom.*"
             
             await event.respond(text)
-            db.mark_messages_as_read(sender_id, self.owner_id)
+            if sender_id != self.owner_id:
+                db.mark_messages_as_read(sender_id, self.owner_id)
         
         @self.bot.on(events.NewMessage(pattern='/help', incoming=True, func=lambda e: e.is_private))
         async def help_command(event):
@@ -368,19 +387,32 @@ class ChatBot:
                 await event.respond(f"📭 **No conversation history for User {user_id}.**")
                 return
             
-            # Filter for unread messages sent TO owner
-            unread_msgs = [m for m in conversations if m['to_user_id'] == self.owner_id and m['is_read'] == 0]
+            # Filter messages for this specific user
+            all_msgs = [m for m in conversations if m['from_user_id'] == user_id or m['to_user_id'] == user_id]
+            all_msgs.sort(key=lambda x: x['sent_date'])
             
-            if not unread_msgs:
-                await event.respond(f"✅ **No new unread messages from User {user_id}.**\n\n💡 Use `/history` or check `/mymessages` again.")
+            if not all_msgs:
+                await event.respond(f"📭 **No conversation history for User {user_id}.**")
                 return
             
-            text = f"📖 **Unread Messages from User {user_id}**\n"
+            # Show latest exchange (both user and owner messages)
+            display_msgs = all_msgs[-15:]
+            
+            unread_count = sum(1 for m in all_msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
+            
+            header = f"📖 **Conversation with User {user_id}**"
+            if unread_count > 0:
+                header += f" ({unread_count} New)"
+                
+            text = f"{header}\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
-            for msg in unread_msgs:
-                time_str = datetime.fromisoformat(msg['sent_date']).strftime('%b %d, %H:%M')
-                text += f"📅 _{time_str}_\n"
+            for msg in display_msgs:
+                time_str = datetime.fromisoformat(msg['sent_date']).strftime('%H:%M')
+                is_owner = msg['from_user_id'] == self.owner_id
+                sender_icon = "👑 You" if is_owner else "👤 User"
+                
+                text += f"_{time_str}_ | **{sender_icon}**\n"
                 text += f"└ `{msg['message']}`\n\n"
             
             text += "━━━━━━━━━━━━━━━━━━━━\n"
@@ -442,10 +474,21 @@ class ChatBot:
         # Group by user
         grouped = {}
         for msg in conversations:
-            other_user = msg['from_user_id'] if msg['to_user_id'] == self.owner_id else msg['to_user_id']
+            # For owner, 'other_user' is the one they are talking to
+            # If msg is FROM owner, other_user is 'to_user_id'
+            # If msg is TO owner, other_user is 'from_user_id'
+            if msg['from_user_id'] == self.owner_id:
+                other_user = msg['to_user_id']
+            else:
+                other_user = msg['from_user_id']
+                
             if other_user not in grouped:
                 grouped[other_user] = []
             grouped[other_user].append(msg)
+        
+        # Sort each group by date ascending so msgs[-1] is the latest
+        for u_id in grouped:
+            grouped[u_id].sort(key=lambda x: x['sent_date'])
         
         sorted_users = sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)
         total_pages = (len(sorted_users) + per_page - 1) // per_page
@@ -459,16 +502,23 @@ class ChatBot:
         
         for user_id, msgs in current_users:
             unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
-            last_msg = msgs[-1]['message']
             
-            if len(last_msg) > 40:
-                last_msg = last_msg[:37] + "..."
+            # Find the absolute last message in this conversation (could be from owner or user)
+            last_msg_obj = msgs[-1]
+            last_msg = last_msg_obj['message']
+            last_sender_id = last_msg_obj['from_user_id']
+            
+            sender_prefix = "👤 " if last_sender_id != self.owner_id else "👑 You: "
+            
+            display_msg = last_msg
+            if len(display_msg) > 40:
+                display_msg = display_msg[:37] + "..."
             
             status_icon = "🔵" if unread > 0 else "⚪️"
             text += f"{status_icon} **User:** `{user_id}`"
             if unread > 0:
                 text += f" (**{unread} new**)"
-            text += f"\n└ _{last_msg}_\n\n"
+            text += f"\n└ {sender_prefix}_{display_msg}_\n\n"
         
         text += "━━━━━━━━━━━━━━━━━━━━\n"
         text += "👉 Use `/reply <user_id> <message>` to respond.\n"
@@ -556,9 +606,23 @@ class ChatBot:
                 await event.respond(f"❌ **User not found:** `{query}`\n\n`{str(e)}`")
         
     
+    async def cleanup_task(self):
+        """Background task to cleanup old messages every 6 hours"""
+        while True:
+            try:
+                LOGGER(__name__).info("Starting scheduled database cleanup...")
+                count = db.cleanup_old_messages(days=7)
+                LOGGER(__name__).info(f"Scheduled cleanup finished. Deleted {count} messages.")
+            except Exception as e:
+                LOGGER(__name__).error(f"Error in background cleanup task: {e}")
+            await asyncio.sleep(6 * 3600)  # Sleep for 6 hours
+
     async def run(self):
         """Start the chat bot"""
         try:
+            # Start background cleanup task
+            self.bot.loop.create_task(self.cleanup_task())
+            
             LOGGER(__name__).info("Starting Chat Bot...")
             # Try bot token first, then fallback to phone auth
             if PyroConf.BOT_TOKEN:
