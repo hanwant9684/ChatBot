@@ -930,6 +930,9 @@ class DatabaseManager:
     def save_chat_message(self, from_user_id: int, to_user_id: int, message: str, message_type: str = 'text') -> bool:
         """Save a chat message between users"""
         try:
+            # Auto-cleanup older than 7 days
+            self.cleanup_old_messages(days=7)
+            
             with self.lock:
                 conn = self._get_connection()
                 cursor = conn.cursor()
@@ -948,6 +951,24 @@ class DatabaseManager:
         except Exception as e:
             LOGGER(__name__).error(f"Error saving chat message: {e}")
             return False
+
+    def cleanup_old_messages(self, days: int = 7) -> int:
+        """Delete messages older than specified days"""
+        try:
+            with self.lock:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cutoff_date = (datetime.now() - timedelta(days=days)).isoformat()
+                cursor.execute('DELETE FROM chat_messages WHERE sent_date < ?', (cutoff_date,))
+                deleted_count = cursor.rowcount
+                conn.commit()
+                conn.close()
+            if deleted_count > 0:
+                LOGGER(__name__).info(f"Cleaned up {deleted_count} old messages (older than {days} days)")
+            return deleted_count
+        except Exception as e:
+            LOGGER(__name__).error(f"Error cleaning up old messages: {e}")
+            return 0
     
     def get_unread_messages(self, user_id: int) -> int:
         """Get count of unread messages for a user"""

@@ -293,18 +293,26 @@ class ChatBot:
             PENDING_REPLIES[self.owner_id] = user_id
             LOGGER(__name__).info(f"Owner awaiting reply for user {user_id}")
         
-        @self.bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id and e.text and not e.text.startswith('/') and e.sender_id in PENDING_REPLIES))
+        @self.bot.on(events.NewMessage(incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id and (e.media or e.text) and not e.text.startswith('/') and e.sender_id in PENDING_REPLIES))
         async def handle_owner_reply(event):
-            """Handle owner typing a reply after clicking Reply button"""
+            """Handle owner typing a reply or sending media after clicking Reply button"""
             user_id = PENDING_REPLIES.pop(event.sender_id)
             message = event.text
             
             try:
-                await self.bot.send_message(
-                    user_id,
-                    message
-                )
-                db.save_chat_message(self.owner_id, user_id, message, 'owner')
+                if event.media:
+                    await self.bot.send_file(
+                        user_id,
+                        event.media,
+                        caption=message
+                    )
+                    db.save_chat_message(self.owner_id, user_id, f"[Media] {message}" if message else "[Media sent]", 'owner')
+                else:
+                    await self.bot.send_message(
+                        user_id,
+                        message
+                    )
+                    db.save_chat_message(self.owner_id, user_id, message, 'owner')
                 
                 msg = await event.respond(f"✅ Sent to {user_id}")
                 asyncio.create_task(self.delete_message_later(msg, delay=3))
@@ -350,6 +358,38 @@ class ChatBot:
                 await event.respond(f"❌ **Error sending reply:** `{str(e)}`")
                 LOGGER(__name__).error(f"Error replying to {user_id}: {e}")
         
+        @self.bot.on(events.NewMessage(pattern=r'/read (\d+)', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
+        async def read_user_messages(event):
+            """Owner command to read unread messages from a specific user"""
+            user_id = int(event.pattern_match.group(1))
+            conversations = db.get_user_conversations(user_id, limit=50)
+            
+            if not conversations:
+                await event.respond(f"📭 **No conversation history for User {user_id}.**")
+                return
+            
+            # Filter for unread messages sent TO owner
+            unread_msgs = [m for m in conversations if m['to_user_id'] == self.owner_id and m['is_read'] == 0]
+            
+            if not unread_msgs:
+                await event.respond(f"✅ **No new unread messages from User {user_id}.**\n\n💡 Use `/history` or check `/mymessages` again.")
+                return
+            
+            text = f"📖 **Unread Messages from User {user_id}**\n"
+            text += "━━━━━━━━━━━━━━━━━━━━\n\n"
+            
+            for msg in unread_msgs:
+                time_str = datetime.fromisoformat(msg['sent_date']).strftime('%b %d, %H:%M')
+                text += f"📅 _{time_str}_\n"
+                text += f"└ `{msg['message']}`\n\n"
+            
+            text += "━━━━━━━━━━━━━━━━━━━━\n"
+            text += f"👉 Reply with `/reply {user_id} <message>`"
+            
+            await event.respond(text)
+            # Mark these as read
+            db.mark_messages_as_read(user_id, self.owner_id)
+
         @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def owner_help(event):
             """Owner help menu"""
@@ -358,6 +398,7 @@ class ChatBot:
                 "━━━━━━━━━━━━━━━━━━━━\n\n"
                 "📊 **GENERAL COMMANDS**\n"
                 "• `/mymessages` - List all active conversations\n"
+                "• `/read <user_id>` - Read unread messages from a user\n"
                 "• `/ownerhelp` - View this help menu\n\n"
                 "✉️ **MESSAGING**\n"
                 "• `/send <user_id> <text>` - Send a new message\n"
@@ -372,11 +413,28 @@ class ChatBot:
 
         @self.bot.on(events.NewMessage(pattern='/mymessages', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def view_all_messages(event):
-            """View all user conversations (owner only)"""
-            conversations = db.get_user_conversations(self.owner_id, limit=50)
+            """View all user conversations (owner only) with pagination"""
+            await self.show_messages_page(event, page=1)
+
+        @self.bot.on(events.CallbackQuery(data=re.compile(br'^msgs_page_(\d+)')))
+        async def handle_page_callback(event):
+            """Handle pagination button clicks"""
+            if event.sender_id != self.owner_id:
+                await event.answer("❌ You don't have permission!", alert=True)
+                return
+            
+            page = int(event.data.decode().split('_')[-1])
+            await self.show_messages_page(event, page=page, edit=True)
+
+        async def show_messages_page(self, event, page=1, edit=False):
+            """Helper to display a specific page of messages"""
+            per_page = 10
+            conversations = db.get_user_conversations(self.owner_id, limit=500)
             
             if not conversations:
-                await event.respond("📭 **No Messages**\n\nYour database is currently empty.")
+                msg = "📭 **No Messages**\n\nYour database is currently empty."
+                if edit: await event.edit(msg)
+                else: await event.respond(msg)
                 return
             
             # Group by user
@@ -387,25 +445,47 @@ class ChatBot:
                     grouped[other_user] = []
                 grouped[other_user].append(msg)
             
-            text = "📬 **Active Conversations**\n"
+            sorted_users = sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)
+            total_pages = (len(sorted_users) + per_page - 1) // per_page
+            start_idx = (page - 1) * per_page
+            end_idx = start_idx + per_page
+            
+            current_users = sorted_users[start_idx:end_idx]
+            
+            text = f"📬 **Active Conversations (Page {page}/{total_pages})**\n"
             text += "━━━━━━━━━━━━━━━━━━━━\n\n"
             
-            for user_id, msgs in sorted(grouped.items(), key=lambda x: x[1][-1]['sent_date'], reverse=True)[:15]:
+            for user_id, msgs in current_users:
                 unread = sum(1 for m in msgs if m['to_user_id'] == self.owner_id and m['is_read'] == 0)
                 last_msg = msgs[-1]['message']
-                if len(last_msg) > 30:
-                    last_msg = last_msg[:27] + "..."
+                
+                if len(last_msg) > 40:
+                    last_msg = last_msg[:37] + "..."
                 
                 status_icon = "🔵" if unread > 0 else "⚪️"
-                text += f"{status_icon} **User:** `{user_id}`\n"
-                text += f"└ _{last_msg}_"
+                text += f"{status_icon} **User:** `{user_id}`"
                 if unread > 0:
                     text += f" (**{unread} new**)"
-                text += "\n\n"
+                text += f"\n└ _{last_msg}_\n\n"
             
             text += "━━━━━━━━━━━━━━━━━━━━\n"
-            text += "👉 Use `/reply <user_id> <message>` to respond."
-            await event.respond(text)
+            text += "👉 Use `/reply <user_id> <message>` to respond.\n"
+            text += "👉 Use `/read <user_id>` to see all unread messages."
+            
+            buttons = []
+            row = []
+            if page > 1:
+                row.append(InlineKeyboardButton.callback("⬅️ Previous", f"msgs_page_{page-1}"))
+            if page < total_pages:
+                row.append(InlineKeyboardButton.callback("Next ➡️", f"msgs_page_{page+1}"))
+            
+            if row:
+                buttons.append(row)
+            
+            if edit:
+                await event.edit(text, buttons=buttons)
+            else:
+                await event.respond(text, buttons=buttons)
 
         @self.bot.on(events.NewMessage(pattern='/ownerhelp', incoming=True, func=lambda e: e.is_private and e.sender_id == self.owner_id))
         async def old_owner_help(event):
