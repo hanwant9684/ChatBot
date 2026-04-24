@@ -130,6 +130,11 @@ class DatabaseManager:
                 )
             ''')
             
+            try:
+                cursor.execute('ALTER TABLE users ADD COLUMN appeal_used INTEGER DEFAULT 0')
+            except sqlite3.OperationalError:
+                pass
+
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_daily_usage_user_date ON daily_usage(user_id, date)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_ad_sessions_created ON ad_sessions(created_at)')
             cursor.execute('CREATE INDEX IF NOT EXISTS idx_ad_verifications_created ON ad_verifications(created_at)')
@@ -466,7 +471,11 @@ class DatabaseManager:
             with self.lock:
                 conn = self._get_connection()
                 cursor = conn.cursor()
-                cursor.execute('UPDATE users SET is_banned = 1 WHERE user_id = ?', (user_id,))
+                # Reset appeal_used when banning so the user gets one fresh ticket
+                cursor.execute(
+                    'UPDATE users SET is_banned = 1, appeal_used = 0 WHERE user_id = ?',
+                    (user_id,)
+                )
                 success = cursor.rowcount > 0
                 conn.commit()
                 conn.close()
@@ -480,7 +489,10 @@ class DatabaseManager:
             with self.lock:
                 conn = self._get_connection()
                 cursor = conn.cursor()
-                cursor.execute('UPDATE users SET is_banned = 0 WHERE user_id = ?', (user_id,))
+                cursor.execute(
+                    'UPDATE users SET is_banned = 0, appeal_used = 0 WHERE user_id = ?',
+                    (user_id,)
+                )
                 success = cursor.rowcount > 0
                 conn.commit()
                 conn.close()
@@ -493,6 +505,38 @@ class DatabaseManager:
         user = self.get_user(user_id)
         is_banned = bool(user and user.get('is_banned', False))
         return is_banned
+
+    def has_used_appeal(self, user_id: int) -> bool:
+        """Whether a banned user has already used their one appeal ticket."""
+        try:
+            conn = self._get_connection()
+            cursor = conn.cursor()
+            cursor.execute('SELECT appeal_used FROM users WHERE user_id = ?', (user_id,))
+            row = cursor.fetchone()
+            conn.close()
+            if not row:
+                return False
+            return bool(row['appeal_used'])
+        except Exception as e:
+            LOGGER(__name__).error(f"Error checking appeal status for {user_id}: {e}")
+            return True  # safer default: don't allow another appeal if we can't read state
+
+    def mark_appeal_used(self, user_id: int) -> bool:
+        try:
+            with self.lock:
+                conn = self._get_connection()
+                cursor = conn.cursor()
+                cursor.execute(
+                    'UPDATE users SET appeal_used = 1 WHERE user_id = ?',
+                    (user_id,)
+                )
+                success = cursor.rowcount > 0
+                conn.commit()
+                conn.close()
+            return success
+        except Exception as e:
+            LOGGER(__name__).error(f"Error marking appeal used for {user_id}: {e}")
+            return False
 
     def set_user_session(self, user_id: int, session_string: Optional[str] = None) -> bool:
         try:
